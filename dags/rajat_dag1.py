@@ -6,7 +6,7 @@ from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 
 
-dag = DAG('rajat_movielens', schedule_interval=None, start_date=datetime.datetime.now())
+dag = DAG('rajat1_movielens', schedule_interval=None, start_date=datetime.datetime.now())
 
 
 # Creates an interactive scala spark session.
