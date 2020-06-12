@@ -1,114 +1,101 @@
-import boto3, json, pprint, requests, textwrap, time, logging, requests
-
-import datetime
+import airflowlib.emr_lib as emr
+import os
 
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
+from datetime import datetime, timedelta
 
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2020, 06, 12),
+    'retries': 0,
+    'retry_delay': timedelta(minutes=2),
+    'provide_context': True
+}
 
-dag = DAG('transform_movielens', concurrency=3, schedule_interval=None, start_date=datetime.datetime.now())
+# Initialize the DAG
+# Concurrency --> Number of tasks allowed to run concurrently
+dag = DAG('transform_movielens', concurrency=3, schedule_interval=None, default_args=default_args)
+region = emr.get_region()
+emr.client(region_name=region)
 
+# Creates an EMR cluster
+def create_emr(**kwargs):
+    cluster_id = emr.create_cluster(region_name=region, cluster_name='movielens_cluster', num_core_nodes=2)
+    return cluster_id
 
-# Creates an interactive scala spark session.
-# Python(kind=pyspark), R(kind=sparkr) and SQL(kind=sql) spark sessions can also be created by changing the value of kind.
-def create_spark_session(master_dns, kind='spark'):
-    # 8998 is the port on which the Livy server runs
-    host = 'http://' + master_dns + ':8998'
-    data = {'kind': kind}
-    headers = {'Content-Type': 'application/json'}
-    response = requests.post(host + '/sessions', data=json.dumps(data), headers=headers)
-    logging.info(response.json())
-    return response.headers
+# Waits for the EMR cluster to be ready to accept jobs
+def wait_for_completion(**kwargs):
+    ti = kwargs['ti']
+    cluster_id = ti.xcom_pull(task_ids='create_cluster')
+    emr.wait_for_cluster_creation(cluster_id)
 
-
-def wait_for_idle_session(master_dns, response_headers):
-    # wait for the session to be idle or ready for job submission
-    status = ''
-    host = 'http://' + master_dns + ':8998'
-    session_url = host + response_headers['location']
-    while status != 'idle':
-        time.sleep(3)
-        status_response = requests.get(session_url, headers=response_headers)
-        status = status_response.json()['state']
-        logging.info('Session status: ' + status)
-    return session_url
-
-def kill_spark_session(session_url):
-    requests.delete(session_url, headers={'Content-Type': 'application/json'})
-
-# Submits the scala code as a simple JSON command to the Livy server
-def submit_statement(session_url, statement_path):
-    statements_url = session_url + '/statements'
-    with open(statement_path, 'r') as f:
-        code = f.read()
-    data = {'code': code}
-    response = requests.post(statements_url, data=json.dumps(data), headers={'Content-Type': 'application/json'})
-    logging.info(response.json())
-    return response
-
-# Function to help track the progress of the scala code submitted to Apache Livy
-def track_statement_progress(master_dns, response_headers):
-    statement_status = ''
-    host = 'http://' + master_dns + ':8998'
-    session_url = host + response_headers['location'].split('/statements', 1)[0]
-    # Poll the status of the submitted scala code
-    while statement_status != 'available':
-        # If a statement takes longer than a few milliseconds to execute, Livy returns early and provides a statement URL that can be polled until it is complete:
-        statement_url = host + response_headers['location']
-        statement_response = requests.get(statement_url, headers={'Content-Type': 'application/json'})
-        statement_status = statement_response.json()['state']
-        logging.info('Statement status: ' + statement_status)
-
-        #logging the logs
-        lines = requests.get(session_url + '/log', headers={'Content-Type': 'application/json'}).json()['log']
-        for line in lines:
-            logging.info(line)
-
-        if 'progress' in statement_response.json():
-            logging.info('Progress: ' + str(statement_response.json()['progress']))
-        time.sleep(10)
-    final_statement_status = statement_response.json()['output']['status']
-    if final_statement_status == 'error':
-        logging.info('Statement exception: ' + statement_response.json()['output']['evalue'])
-        for trace in statement_response.json()['output']['traceback']:
-            logging.info(trace)
-        raise ValueError('Final Statement Status: ' + final_statement_status)
-    logging.info('Final Statement Status: ' + final_statement_status)
-
-
+# Terminates the EMR cluster
+def terminate_emr(**kwargs):
+    ti = kwargs['ti']
+    cluster_id = ti.xcom_pull(task_ids='create_cluster')
+    emr.terminate_cluster(cluster_id)
 
 # Converts each of the movielens datafile to parquet
 def transform_movies_to_parquet(**kwargs):
-    cluster_dns = '<EMR_CLUSTER_NAME>'
-    headers = create_spark_session(cluster_dns, 'spark')
-    session_url = wait_for_idle_session(cluster_dns, headers)
-    statement_response = submit_statement(session_url,'/root/airflow/dags/transform/movies.scala')
-    track_statement_progress(cluster_dns, statement_response.headers)
-    kill_spark_session(session_url)
+    # ti is the Task Instance
+    ti = kwargs['ti']
+    cluster_id = ti.xcom_pull(task_ids='create_cluster')
+    cluster_dns = emr.get_cluster_dns(cluster_id)
+    headers = emr.create_spark_session(cluster_dns, 'spark')
+    session_url = emr.wait_for_idle_session(cluster_dns, headers)
+    statement_response = emr.submit_statement(session_url,
+                                              '/root/airflow/dags/transform/movies.scala')
+    emr.track_statement_progress(cluster_dns, statement_response.headers)
+    emr.kill_spark_session(session_url)
 
 def transform_tags_to_parquet(**kwargs):
-    cluster_dns = '<EMR_CLUSTER_NAME>'
-    headers = create_spark_session(cluster_dns, 'spark')
-    session_url = wait_for_idle_session(cluster_dns, headers)
-    statement_response = submit_statement(session_url,'/root/airflow/dags/transform/tags.scala')
-    track_statement_progress(cluster_dns, statement_response.headers)
-    kill_spark_session(session_url)
+    # ti is the Task Instance
+    ti = kwargs['ti']
+    cluster_id = ti.xcom_pull(task_ids='create_cluster')
+    cluster_dns = emr.get_cluster_dns(cluster_id)
+    headers = emr.create_spark_session(cluster_dns, 'spark')
+    session_url = emr.wait_for_idle_session(cluster_dns, headers)
+    statement_response = emr.submit_statement(session_url,
+                                              '/root/airflow/dags/transform/tags.scala')
+    emr.track_statement_progress(cluster_dns, statement_response.headers)
+    emr.kill_spark_session(session_url)
 
 def transform_ratings_to_parquet(**kwargs):
-    cluster_dns = '<EMR_CLUSTER_NAME>'
-    headers = create_spark_session(cluster_dns, 'spark')
-    session_url = wait_for_idle_session(cluster_dns, headers)
-    statement_response = submit_statement(session_url,'/root/airflow/dags/transform/ratings.scala')
-    track_statement_progress(cluster_dns, statement_response.headers)
-    kill_spark_session(session_url)
+    # ti is the Task Instance
+    ti = kwargs['ti']
+    cluster_id = ti.xcom_pull(task_ids='create_cluster')
+    cluster_dns = emr.get_cluster_dns(cluster_id)
+    headers = emr.create_spark_session(cluster_dns, 'spark')
+    session_url = emr.wait_for_idle_session(cluster_dns, headers)
+    statement_response = emr.submit_statement(session_url,
+                                              '/root/airflow/dags/transform/ratings.scala')
+    emr.track_statement_progress(cluster_dns, statement_response.headers)
+    emr.kill_spark_session(session_url)
 
 def transform_links_to_parquet(**kwargs):
-    cluster_dns = '<EMR_CLUSTER_NAME>'
-    headers = create_spark_session(cluster_dns, 'spark')
-    session_url = wait_for_idle_session(cluster_dns, headers)
-    statement_response = submit_statement(session_url,'/root/airflow/dags/transform/links.scala')
-    track_statement_progress(cluster_dns, statement_response.headers)
-    kill_spark_session(session_url)
+    # ti is the Task Instance
+    ti = kwargs['ti']
+    cluster_id = ti.xcom_pull(task_ids='create_cluster')
+    cluster_dns = emr.get_cluster_dns(cluster_id)
+    headers = emr.create_spark_session(cluster_dns, 'spark')
+    session_url = emr.wait_for_idle_session(cluster_dns, headers)
+    statement_response = emr.submit_statement(session_url,
+                                              '/root/airflow/dags/transform/links.scala')
+    emr.track_statement_progress(cluster_dns, statement_response.headers)
+    emr.kill_spark_session(session_url)
+
+# Define the individual tasks using Python Operators
+create_cluster = PythonOperator(
+    task_id='create_cluster',
+    python_callable=create_emr,
+    dag=dag)
+
+wait_for_cluster_completion = PythonOperator(
+    task_id='wait_for_cluster_completion',
+    python_callable=wait_for_completion,
+    dag=dag)
 
 transform_movies = PythonOperator(
     task_id='transform_movies',
@@ -128,7 +115,18 @@ transform_tags = PythonOperator(
 transform_links = PythonOperator(
     task_id='transform_links',
     python_callable=transform_links_to_parquet,
-    dag=dag)    
+    dag=dag)
 
-transform_movies >> transform_ratings
-transform_links >> transform_tags
+
+terminate_cluster = PythonOperator(
+    task_id='terminate_cluster',
+    python_callable=terminate_emr,
+    trigger_rule='all_done',
+    dag=dag)
+
+# construct the DAG by setting the dependencies
+create_cluster >> wait_for_cluster_completion
+wait_for_cluster_completion >> transform_movies >> terminate_cluster
+wait_for_cluster_completion >> transform_ratings >> terminate_cluster
+wait_for_cluster_completion >> transform_links >> terminate_cluster
+wait_for_cluster_completion >> transform_tags >> terminate_cluster
