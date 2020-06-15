@@ -4,6 +4,19 @@ import os
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 from datetime import datetime, timedelta
+from airflow.operators import LivySparkOperator
+
+HTTP_CONN_ID = "livy_http_conn"
+SESSION_TYPE = "spark"
+SPARK_SCRIPT = """
+import java.util
+println("sc: " + sc)
+val rdd = sc.parallelize(1 to 5)
+val rddFiltered = rdd.filter(entry => entry > 3)
+println(util.Arrays.toString(rddFiltered.collect()))
+val movies_df = spark.read.format("csv").option("header", "true").option("inferschema", "true").load("s3://batchmovielensdataset/movies.csv")
+movies_df.write.mode("overwrite").parquet("s3://batchmovielensdataset/movielens-parquet/movies/")
+"""
 
 default_args = {
     'owner': 'airflow',
@@ -117,8 +130,16 @@ transform_links = PythonOperator(
     python_callable=transform_links_to_parquet,
     dag=dag)
 
+livymovie = LivySparkOperator(
+    task_id='livy-' + SESSION_TYPE,
+    spark_script=SPARK_SCRIPT,
+    http_conn_id=HTTP_CONN_ID,
+    session_kind=SESSION_TYPE,
+    dag=dag)
+
 # construct the DAG by setting the dependencies
 create_cluster >> wait_for_cluster_completion
+wait_for_cluster_completion >> livymovie
 wait_for_cluster_completion >> transform_movies
 wait_for_cluster_completion >> transform_ratings
 wait_for_cluster_completion >> transform_links
