@@ -1,4 +1,4 @@
-import boto3, json, pprint, requests, textwrap, time, logging, requests
+import boto3, json, pprint, requests, textwrap, time, logging
 from datetime import datetime
 
 def get_region():
@@ -15,7 +15,7 @@ def get_security_group_id(group_name, region_name):
     response = ec2.describe_security_groups(GroupNames=[group_name])
     return response['SecurityGroups'][0]['GroupId']
 
-def create_cluster(region_name, cluster_name='Airflow-' + str(datetime.now()), release_label='emr-5.30.0',master_instance_type='m5.xlarge', num_core_nodes=0, core_node_instance_type='m5.xlarge'):
+def create_cluster(region_name, cluster_name='Airflow-' + str(datetime.now()), release_label='emr-5.9.0',master_instance_type='m5.xlarge', num_core_nodes=0, core_node_instance_type='m5.xlarge'):
     emr_master_security_group_id = get_security_group_id('ElasticMapReduce-master', region_name=region_name)
     emr_slave_security_group_id = get_security_group_id('ElasticMapReduce-slave', region_name=region_name)
     cluster_response = emr.run_job_flow(
@@ -35,7 +35,7 @@ def create_cluster(region_name, cluster_name='Airflow-' + str(datetime.now()), r
                     'Market': 'ON_DEMAND',
                     'InstanceRole': 'CORE',
                     'InstanceType': core_node_instance_type,
-                    'InstanceCount': num_core_nodes
+                    'InstanceCount': 0
                 }
             ],
             'KeepJobFlowAliveWhenNoSteps': True,
@@ -86,8 +86,12 @@ def wait_for_idle_session(master_dns, response_headers):
     status = ''
     host = 'http://' + master_dns + ':8998'
     session_url = host + response_headers['location']
+    logging.info(session_url)
+    status_response=requests.get(session_url, headers=response_headers)
+    logging.info(status_response)
+    logging.info(status_response.json()['state'])
     while status != 'idle':
-        time.sleep(3)
+        time.sleep(20)
         status_response = requests.get(session_url, headers=response_headers)
         status = status_response.json()['state']
         logging.info('Session status: ' + status)
