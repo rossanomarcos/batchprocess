@@ -35,7 +35,7 @@ def create_cluster(region_name, cluster_name='Airflow-' + str(datetime.now()), r
                     'Market': 'ON_DEMAND',
                     'InstanceRole': 'CORE',
                     'InstanceType': core_node_instance_type,
-                    'InstanceCount': 0
+                    'InstanceCount': 1
                 }
             ],
             'KeepJobFlowAliveWhenNoSteps': True,
