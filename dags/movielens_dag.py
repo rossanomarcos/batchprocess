@@ -117,9 +117,15 @@ transform_links = PythonOperator(
     python_callable=transform_links_to_parquet,
     dag=dag)
 
+terminate_cluster = PythonOperator(
+    task_id='terminate_cluster',
+    python_callable=terminate_emr,
+    trigger_rule='all_done',
+    dag=dag)
+
 # construct the DAG by setting the dependencies
 create_cluster >> wait_for_cluster_completion
-wait_for_cluster_completion >> transform_movies
-wait_for_cluster_completion >> transform_ratings
-wait_for_cluster_completion >> transform_links
-wait_for_cluster_completion >> transform_tags
+wait_for_cluster_completion >> transform_movies >> terminate_cluster
+wait_for_cluster_completion >> transform_ratings >> terminate_cluster
+wait_for_cluster_completion >> transform_links >> terminate_cluster
+wait_for_cluster_completion >> transform_tags >> terminate_cluster
